@@ -1,116 +1,113 @@
+import { emitter, config } from './ui'
+const app = document.querySelector('#app')
+
 import * as THREE from 'three'
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js'
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js'
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js'
-import { FreiChenShader } from 'three/addons/shaders/FreiChenShader.js'
+import { SobelOperatorShader } from 'three/addons/shaders/SobelOperatorShader.js'
 import { CopyShader } from 'three/addons/shaders/CopyShader.js'
-import { runFn } from './utils'
 
-export class GlRenderer {
-  /**
-   * @param {HTMLCanvasElement} canvas
-   * @param {import('./gui').GlGui} gui
-   */
-  constructor(canvas, gui) {
-    this.canvas = canvas
-    this.gui = gui
-    this.init()
-  }
+function init(cw, ch) {
+  const renderer = new THREE.WebGLRenderer()
+  renderer.setPixelRatio(window.devicePixelRatio)
+  renderer.setSize(cw, ch)
+  app.appendChild(renderer.domElement)
+  /**@type {THREE.Mesh} */
+  let imageMesh
+  let imgUrl
+  let imgSize
 
-  init() {
-    this._rendererSize = null
-    this.renderer = new THREE.WebGLRenderer({ canvas: this.canvas, antialias: true })
-    this.renderer.setClearColor(0x0)
-    this.renderer.setSize(window.innerWidth, window.innerHeight)
+  const scene = new THREE.Scene()
+  const camera = new THREE.OrthographicCamera(-cw / 2, cw / 2, ch / 2, -ch / 2, 1, 1000)
+  camera.position.z = 10
 
-    this.scene = new THREE.Scene()
-    this.camera = new THREE.OrthographicCamera(
-      -this.canvas.width / 2,
-      this.canvas.width / 2,
-      this.canvas.height / 2,
-      -this.canvas.height / 2,
-      0,
-      10
-    )
-    this.camera.position.set(0, 0, 5)
-    this.scene.add(this.camera)
+  const composer = new EffectComposer(renderer)
+  const renderPass = new RenderPass(scene, camera)
+  const edgePass = new ShaderPass(SobelOperatorShader)
+  edgePass.uniforms['resolution'].value.x = cw * window.devicePixelRatio
+  edgePass.uniforms['resolution'].value.y = ch * window.devicePixelRatio
+  const copyPass = new ShaderPass(CopyShader)
+  copyPass.renderToScreen = true
 
-    const composer = new EffectComposer(this.renderer)
+  composer.addPass(renderPass)
+  composer.addPass(edgePass)
+  composer.addPass(copyPass)
 
-    const renderPass = new RenderPass(this.scene, this.camera)
-    const edgeShader = new ShaderPass(FreiChenShader)
-    const copyShader = new ShaderPass(CopyShader)
-    copyShader.renderToScreen = true
+  renderer.setAnimationLoop(animate)
+  emitter.on('change-image', loadImage)
+  loadImage('/imgs/3.jpg')
 
-    composer.addPass(renderPass)
-    composer.addPass(edgeShader)
-    composer.addPass(copyShader)
-
-    this.initEvents()
-  }
-
-  initEvents() {
-    window.addEventListener('resize', () => {
-      this.renderer.setSize(window.innerWidth, window.innerHeight)
-    })
-
-    this.gui.on('changeImage', this.changeImage)
-  }
-
-  changeImage(url) {
-    const size = getRendererSize()
+  function loadImage(url) {
+    if (!url) return
     const loader = new THREE.TextureLoader()
     loader.load(url, (texture) => {
-      const imgMesh = new THREE.Mesh(new THREE.PlaneGeometry(), new THREE.MeshBasicMaterial({}))
+      imgUrl = url
+      const size = getImageSize(texture.source.data)
+      texture.magFilter = THREE.LinearFilter
+      texture.minFilter = THREE.LinearFilter
+      texture.colorSpace = THREE.SRGBColorSpace
+
+      const geometry = new THREE.PlaneGeometry(size.w, size.h)
+      const material = new THREE.MeshBasicMaterial({
+        map: texture,
+      })
+      if (imageMesh) {
+        imageMesh.material = material
+      } else {
+        imageMesh = new THREE.Mesh(geometry, material)
+        scene.add(imageMesh)
+      }
+
+      // process()
     })
   }
 
-  getRendererSize() {
-    if (this._rendererSize) return this._rendererSize
+  function getImageSize(img) {
+    const { width: iw, height: ih } = img
+    const { clientWidth: rw, clientHeight: rh } = renderer.domElement
 
-    const { width: iw, height: ih } = this.srcImage
-    const { width: cw, height: ch } = this.canvas
-
-    const rendererSize = {
-      w: cw,
-      h: ch,
-      ow: 0,
-      oh: 0,
+    const size = {}
+    if (iw / ih > rw / rh) {
+      size.w = rw
+      size.h = rw * (ih / iw)
+      size.ot = (rh - size.h) / 2
+    } else {
+      size.h = rh
+      size.w = rh * (iw / ih)
+      size.ol = (rw - size.w) / 2
     }
-    /**
-     * If the aspect ratio of the image is greater than the canvas aspect ratio, it is centered vertically,
-     * otherwise horizontally.
-     */
-    if (iw / ih > cw / ch) {
-    }
+    imgSize = size
+    return size
   }
 
-  changeImage(imagePath, cb) {
-    this.imagePath = imagePath
-    this._rendererSize = null
-    this.clear()
-    this.preRender(cb)
+  function process() {
+    const gl = renderer.getContext()
+    const pixels = new Uint8Array(imgSize.w * imgSize.h * 4)
+    gl.readPixels(imgSize.ol, imgSize.ot, imgSize.w, imgSize.h, gl.RGBA, gl.UNSIGNED_BYTE, pixels)
   }
 
-  preRender(cb) {
-    this.srcImage = new Image()
-    this.srcImage.src = this.imagePath
-
-    this.srcImage.onload = () => {
-      const { width, height } = this.srcImage
-      const canvas = document.createElement('canvas')
-      canvas.width = width
-      canvas.height = height
-      const ctx = canvas.getContext('2d')
-      ctx.drawImage(this.srcImage, 0, 0, width, height)
-      this.srcPixel = ctx.getImageData(0, 0, width, height).data
-      this.render()
-      runFn(cb)
+  function animate() {
+    if (config.effect) {
+      composer.render()
+    } else {
+      renderer.render(scene, camera)
     }
   }
 
-  render() {
-    this.clear()
+  window.addEventListener('resize', resize)
+  function resize() {
+    const { innerWidth: cw, innerHeight: ch } = window
+    camera.left = -cw / 2
+    camera.right = cw / 2
+    camera.top = ch / 2
+    camera.bottom = -ch / 2
+    camera.updateProjectionMatrix()
+    edgePass.uniforms['resolution'].value.x = cw * window.devicePixelRatio
+    edgePass.uniforms['resolution'].value.y = ch * window.devicePixelRatio
+    renderer.setSize(cw, ch)
+    composer.setSize(cw, ch)
   }
-  clear() {}
 }
+
+init(window.innerWidth, window.innerHeight)
